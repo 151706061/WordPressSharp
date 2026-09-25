@@ -1,84 +1,124 @@
-# WordPressSharp #
-A C# client to interact with the WordPress XML-RPC API
+# WordPressSharp
 
-## Install ##
-I'm working on a Nuget package once I'm done mapping all the WP XML-RPC endpoints.
+WordPressSharp 2.x is an asynchronous .NET 10 client for the WordPress REST API. It supports typed methods for common WordPress core resources and generic requests for plugin and custom endpoints discovered from a site's REST API index.
 
-In the meantime, you'll have to clone, build, and add the DLL the ole fashioned way
+> **Version 2 is a breaking change.** The old XML-RPC API (`WordPressClient`, `WordPressSiteConfig`, and `WordPressSharp.Models.Post`) was replaced by a REST API client. XML-RPC is no longer included.
 
-## Config ##  
-Use your config file to for configuration settings:
-```xml
-<?xml version="1.0" encoding="utf-8" ?>
-<configuration>
-	<appSettings>
-		<add key="WordPressUsername" value="" />
-		<add key="WordPressPassword" value="" />
-		<add key="WordPressBaseUrl" value="" />
-		<add key="WordPressBlogId" value="" />
-	</appSettings>
-</configuration>
+## Requirements
+
+- .NET 10
+- A WordPress site with the REST API available
+- For authenticated server-to-server access, a WordPress Application Password (WordPress 5.6+) and HTTPS
+
+Install from NuGet after publishing:
+
+```sh
+dotnet add package WordPressSharp --version 2.0.0
 ```
-As an alternative you can use the `WordPressSiteConfig` class to store configuration settings.
 
-# Examples #  
+## Create a client
 
-## Create Post ##  
+```csharp
+using WordPressSharp;
 
-    using (var client = new WordPressClient()) 
-    {
-        var post = new Post
-        {
-            PostType = "post",
-            Title = "My Awesome Post",
-            Content = "<p>This is the content</p>",
-            PublishDateTime = DateTime.Now
-        };
-    
-        var id = Convert.ToInt32(client.NewPost(post));
-    }
+using var client = new WordPressClient(new WordPressClientOptions
+{
+    SiteUri = new Uri("https://example.com/"),
+    Username = "api-user",
+    ApplicationPassword = Environment.GetEnvironmentVariable("WORDPRESS_APP_PASSWORD")!
+});
 
-## Create Post Tag ##
+var api = await client.DiscoverAsync();
+Console.WriteLine($"{api.Name}: {api.Namespaces?.Length ?? 0} namespaces");
+```
 
-    using (var client = new WordPressClient())
-    {
-        var termId = client.NewTerm(new Term
-        {
-            Name = "term test",
-            Description = "term description",
-            Slug = "term_test",
-            Taxonomy = "post_tag"
-        });
-    }
+Application Password credentials are sent using HTTP Basic authentication only to HTTPS URLs on the configured site's host and port. To use custom authentication, construct the client with an `HttpClient` configured with your own authentication handler:
 
-## Add feature image ##
-You can add a feature image by using the `Data.CreateFromUrl` or `Data.CreateFromFilePath`:
+```csharp
+var httpClient = new HttpClient(myAuthenticationHandler);
+var client = new WordPressClient(new WordPressClientOptions
+{
+    SiteUri = new Uri("https://example.com/")
+}, httpClient);
+```
 
-    string url = "https://unsplash.imgix.net/photo-1423683249427-8ca22bd873e0";
-    using (var client = new WordPressClient()) 
-    {
-        var post = new Post
-        {
-            PostType = "post",
-            Title = "New photo from Unsplash",
-            Content = "<p>Check out this new picture from Unsplash.</p>",
-            PublishDateTime = DateTime.Now
-        };
-        
-        var featureImage = Data.CreateFromUrl(url);
-        post.FeaturedImageId = client.UploadFile(featureImage).Id;
-    
-        var id = Convert.ToInt32(client.NewPost(post));
-    }
+When you inject `HttpClient`, its lifetime and timeout remain caller-managed; the client does not dispose it.
 
-# Tutorials #
-[How to publish a post or page](http://brudtkuhl.com/using-wordpresssharp-publish-post/)
+## Core endpoint examples
 
-# Dependencies #
-[XML-RPC.net](http://xml-rpc.net/)
+### List and create posts
 
-# Resources #
-[WordPress XML-RPC API](http://codex.wordpress.org/XML-RPC_WordPress_API)
+```csharp
+var posts = await client.GetPostsAsync(new WordPressListOptions
+{
+    Page = 1,
+    PerPage = 20,
+    Search = "launch",
+    Status = "publish"
+});
 
-# Notes #
-Inspired by the [POSSIBLE.WordPress.XmlRpcClient](https://github.com/markeverard/POSSIBLE.WordPress.XmlRpcClient) by [markeverard](https://github.com/markeverard)
+Console.WriteLine($"Page contains {posts.Items.Count} of {posts.TotalItems} posts");
+
+var created = await client.CreatePostAsync(WordPressPayload.Create(new
+{
+    title = "Hello from WordPressSharp",
+    content = "<p>Posted through the REST API.</p>",
+    status = "draft",
+    categories = new[] { 4 },
+    featured_media = 27
+}));
+```
+
+### Upload media
+
+```csharp
+await using var stream = File.OpenRead("image.jpg");
+var media = await client.UploadMediaAsync("image.jpg", "image/jpeg", stream, title: "Site image");
+```
+
+### Use a custom or plugin route
+
+```csharp
+var routes = await client.GetRoutesAsync();
+var customResult = await client.SendJsonAsync(
+    HttpMethod.Get,
+    "my-plugin/v1/items",
+    query: new[] { new KeyValuePair<string, string?>("per_page", "10") });
+```
+
+Inspect a specific endpoint's accepted methods and schema:
+
+```csharp
+var schema = await client.GetEndpointSchemaAsync("my-plugin/v1/items");
+```
+
+Requests accept relative REST routes with or without a leading slash. Use `JsonElement` or your own DTO with `GetAsync<T>` when an endpoint has a custom response shape.
+
+## Typed core operations
+
+The client currently provides typed models and methods for:
+
+- Posts and pages, create/update/delete, revisions, and autosaves
+- Media, including binary upload
+- Comments
+- Users
+- Categories and tags
+- Post types, taxonomies, statuses, and settings
+- Search, blocks, block types/rendering, themes, and plugins
+- REST API discovery, route listing, endpoint schemas, and generic JSON requests
+
+WordPress REST endpoints and permissions vary by installed WordPress version, user role, and plugins. Custom post types and taxonomies must be registered with REST support on the site. Use the REST index and `OPTIONS` schema response to determine what a particular site exposes.
+
+All network methods are asynchronous and accept an optional `CancellationToken`. Collection methods return `WordPressPage<T>` with WordPress pagination headers when available. API errors throw `WordPressApiException`, including the HTTP status, WordPress error code, and optional error data.
+
+## Build and test
+
+```sh
+dotnet test src/WordPressSharpTest/WordPressSharpTest.csproj
+```
+
+The test suite uses a fake HTTP handler and does not require a WordPress server or credentials.
+
+## Security note
+
+Create an Application Password for a dedicated WordPress user with only the capabilities it needs. Store it in a secret store or environment variable, not in source control. WordPress Application Passwords are intended for HTTPS connections.
